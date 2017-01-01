@@ -1,0 +1,259 @@
+---
+title: "An Empirical Analysis of Baseball"
+author: "Ramanpreet Chand"
+date: "December 5, 2016"
+output: 
+  ioslides_presentation:
+      #css: style.css
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+setwd("C:/Workspace/baseball-project")
+
+
+# Load Packages
+library(RMySQL)
+library(DBI)
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(pryr)
+library(data.table)
+
+# Disable Scientific Notation
+options(scipen = 999)
+
+# Open MySQL connection
+con <- dbConnect(RMySQL::MySQL(), user = 'root', password = 'pg_password', host = 'localhost', dbname = 'retrosheet')
+
+# Close MySQL connection using on.exit()
+#on.exit(dbDisconnect(con))
+
+# Build Queries by decade
+query.events <- dbSendQuery(con, "SELECT GAME_ID, YEAR_ID, BAT_ID, PIT_ID, BAT_TEAM_ID, FLD_TEAM_ID, H_CD, AB_FL, EVENT_CD, SH_FL, SF_FL, BATTEDBALL_CD, RBI_CT, DP_FL, TP_FL, PB_FL, BUNT_FL, BAT_HAND_CD, PIT_HAND_CD, PA_NEW_FL, ERR_CT, PO1_FLD_CD, PO2_FLD_CD, PO3_FLD_CD
+                            FROM retrosheet.events WHERE YEAR_ID BETWEEN 1976 AND 2015")
+
+# Store Queries in local data frames
+data.events <- fetch(query.events, n = -1)
+
+# Class Declarations
+data.events$YEAR_ID <- factor(data.events$YEAR_ID)
+data.events$AB_FL <- factor(data.events$AB_FL, labels = c('Not At Bat', 'At Bat'))
+data.events$H_CD <- factor(data.events$H_CD, labels = c('No Hit', '1B', '2B', '3B', 'HR'))
+data.events$EVENT_CD <- factor(data.events$EVENT_CD, labels = c('Out', 'K', 'SB', 'DI', 'CS', 'PK', 'WP', 'PB', 'BK', 'OA', 'FE', 'NIBB', 'IBB', 'HBP', 'XI', 'ROE', 'FC', '1B', '2B', '3B', 'HR'))
+data.events$BATTEDBALL_CD <- factor(data.events$BATTEDBALL_CD, labels = c('Null', 'FB', 'GB', 'LD', 'PU'))
+data.events$BUNT_FL <- factor(data.events$BUNT_FL)
+data.events$SH_FL <- factor(data.events$SH_FL, labels = c('Not Awarded', 'Awarded'))
+data.events$SF_FL <- factor(data.events$SF_FL, labels = c('Not Awarded', 'Awarded'))
+data.events$DP_FL <- factor(data.events$DP_FL, labels = c('Not Awarded', 'Awarded'))
+data.events$TP_FL <- factor(data.events$TP_FL, labels = c('Not Awarded', 'Awarded'))
+data.events$PB_FL <- factor(data.events$PB_FL, labels = c('Not Awarded', 'Awarded'))
+data.events$PA_NEW_FL <- factor(data.events$PA_NEW_FL, labels = c('Not Awarded', 'Awarded'))
+data.events$PIT_HAND_CD <- factor(data.events$PIT_HAND_CD, labels = c('Both', 'Left', 'Right'))
+data.events$BAT_HAND_CD <- factor(data.events$BAT_HAND_CD, labels = c('Unknown', 'Left', 'Right'))
+
+# Declare new variables
+data.events <- data.events %>%
+    mutate(h = ifelse(H_CD == 'No Hit', 0, 1), 
+           ab = ifelse(AB_FL == 'Not At Bat', 0, 1),
+           bb = ifelse(EVENT_CD == 'NIBB', 1, 0), 
+           hbp = ifelse(EVENT_CD == 'HBP', 1, 0),
+           sf = ifelse(SF_FL == 'Not Awarded', 0, 1), 
+           weightH = ifelse(EVENT_CD == '1B', 1, ifelse(EVENT_CD == '2B', 2, ifelse(EVENT_CD == '3B',3, ifelse(EVENT_CD == 'HR', 4, 0)))),
+           cs = ifelse(EVENT_CD == 'CS', 1, 0), 
+           ibb = ifelse(EVENT_CD == 'IBB', 1, 0),
+           sh = ifelse(SH_FL == 'Not Awarded', 0, 1), 
+           sb = ifelse(EVENT_CD == 'SB', 1, 0), 
+           out = ifelse(EVENT_CD == 'Out', 1, 0),
+           k = ifelse(EVENT_CD =='K', 1, 0), 
+           bk = ifelse(EVENT_CD == 'BK', 1, 0),
+           di = ifelse(EVENT_CD == 'DI', 1, 0),
+           flyBall = ifelse(BATTEDBALL_CD == 'FB', 1, 0),
+           groundBall = ifelse(BATTEDBALL_CD == 'GB', 1, 0),
+           firstB = ifelse(EVENT_CD=='1B', 1, 0), 
+           secB = ifelse(EVENT_CD=='2B',1,0), 
+           thirdB = ifelse(EVENT_CD=='3B',1,0), 
+           hr = ifelse(EVENT_CD=='HR', 1, 0),
+           gidp = ifelse(DP_FL=='Not Awarded', 0, 1),
+           tp = ifelse(TP_FL == 'Not Awarded', 0, 1),
+           pb = ifelse(PB_FL == 'Not Awarded', 0, 1),
+           pa = ifelse(PA_NEW_FL == 'Not Awarded', 0, 1),
+           wp = ifelse(EVENT_CD == 'WP', 1, 0),
+           roe = ifelse(EVENT_CD == "ROE", 1, 0))
+
+fileID <- "player_ids.csv"
+col <- c('BAT_ID', 'FIRST', 'LAST', 'DEBUT')
+Player <- fread(fileID, data.table = FALSE, header = TRUE, showProgress = FALSE, na.strings = "NULL")
+names(Player) <- col
+# Substring
+Player <- Player %>% mutate(DEBUT = substr(DEBUT, 0, 10)) %>% data.frame()
+# Class Declaration
+Player$DEBUT <- mdy(Player$DEBUT)
+
+# Extra for Fielders and Pitchers' calculations
+fileMas <- "lahmanDB/2015/baseballdatabank-master/core/Master.csv"
+masVar <- c("playerID", "retroID")
+master <- fread(fileMas, data.table = FALSE, showProgress = FALSE, na.strings = "NULL", select = masVar)
+
+# Extra for Pitchers
+file <- "lahmanDB/2015/baseballdatabank-master/core/Pitching.csv"
+myVar <- c("playerID", "yearID", "W", "L", "G", "GS", "CG", "SHO", "SV", "IPouts", "ER", "BFP", "GF", "R")
+Pitching.file <- fread(file, data.table = FALSE, showProgress = FALSE, na.strings = "NULL", select = myVar)
+Pitching.file <- Pitching.file %>% filter(yearID >= 1976)
+
+# Extra for Fielders 
+fileField <- "lahmanDB/2015/baseballdatabank-master/core/Fielding.csv"
+Fielding.file <- fread(fileField, data.table = FALSE, showProgress = FALSE, na.strings = "NULL", select=c("yearID", "teamID", "playerID", "POS", "InnOuts", "A"))
+Fielding.file <- merge(Fielding.file, master, by="playerID")
+Fielding.file <- Fielding.file %>% filter(yearID >= 1976)
+colsF <- c("playerID", "YEAR_ID", "FLD_TEAM_ID", "POS", "InnOuts", "Assists", "BAT_ID")
+names(Fielding.file) <- colsF
+```
+
+## An Introduction
+
+A statistical analysis of baseball involves measuring the individual, team and league's performance based on two broad categories:
+
+- Offense: players are in a position to score
+- - Batting
+- Defense : players are in a position to prevent 
+- - Pitching
+- - Fielding
+  
+Sabermetrics objectively measure player performance that contributes to a team's win or loss.
+
+## Key Terminology - Batting
+
+- At Bats : A batter's turn against a pitcher 
+- Batting Average : Hits to At Bat ratio
+- OBP * : On Base Percentage
+- SLG * : Slugging measures the power of a batter
+- OPS * : On Base Plus Slugging
+- ISO * : Isolated Power
+- BABIP * : Batting Average for Balls in Play
+- Runs Created *
+- - A Sabermetric used to estimate the number of runs an individual player contributes to a team.
+
+## Key Terminology - Pitching
+
+- WHIP * : Walks Plus Hits per Inning Pitched
+- - Measures a pitchers effectiveness in preventin a batter from running
+- LOB % * : Left On Base Percentage
+- - Measures the ratio at which he leaves baserunners stranded by the end of the innings
+- FIP * : Fielding Independent Pitching
+- - Measure a pitcher's performance based on the events he can control
+- DICE * : Defensive Independent Component ERA
+- - Portrays a pitchers Earned Runs Average
+  
+## Key Terminology - Fielding
+
+- TC : Total Chances a fielder has to handle a ball in play
+- FP : Fielding Percentage
+  - Measures effectiveness of Fielders
+- RF : Range Factor
+  - Measures a fielder's actual contribution to a team based on position
+- DER : Defensive-Efficiency Ratio
+  - Determines the overall effectiveness of a team's defense.
+
+```{r echo=FALSE}
+# Batting Statistics Summarized over Time
+Batting.active <- data.events %>% group_by(YEAR_ID, BAT_ID, BAT_HAND_CD) %>% filter(sum(ab)>=250) %>%
+  summarize(firstBase = sum(firstB), secondBase=sum(secB), thirdBase=sum(thirdB), HR=sum(hr), K=sum(k),
+            H=sum(h), AB = sum(ab), BB=sum(bb), CS=sum(cs), GIDP=sum(gidp), HBP=sum(hbp), IBB=sum(ibb), PA=sum(pa), RBI=sum(RBI_CT), SF=sum(sf), SH=sum(sh), SB=sum(sb), TB=sum(weightH)) %>%
+  as.data.frame()
+
+# Class Declaration
+Batting.active$YEAR_ID <- ymd(paste(Batting.active$YEAR_ID, "-01-01", sep=""))
+
+# mutate new statistics for each roster
+Batting.active <- Batting.active %>% group_by(YEAR_ID, BAT_ID, BAT_HAND_CD) %>%
+  mutate(Avg = round(H/AB,3),
+         OBP = round(100*((H + BB + HBP)/(AB + BB + HBP + SF)),2),
+         SLG = round((TB/AB),3),
+         OPS = round((sum(OBP)/100) + sum(SLG),3),
+         ISO = (TB-H)/AB,
+         RC = round((((H + BB + HBP - CS - GIDP) * (TB + 0.26 * (BB - IBB + HBP)) + (0.52 * (SH + SF + SB)))/(AB + BB + HBP + SH + SF)),3),
+         BABIP = round(((H - HR)/(AB - K - HR + SF)),3)) %>% as.data.frame()
+
+# Merge Datasets to Player
+Batting.active <- merge(Batting.active, Player, by="BAT_ID")
+
+Batting <- Batting.active %>% group_by(YEAR_ID) %>% summarize(Avg.avg = mean(Avg, na.rm=TRUE),
+                                                              RC.avg = mean(RC, na.rm=TRUE),
+                                                             OBP.avg = mean((OBP/100),na.rm=TRUE),
+                                                             SLG.avg = mean(SLG, na.rm=TRUE),
+                                                             OPS.avg = mean(OPS, na.rm=TRUE),
+                                                             ISO.avg = mean(ISO, na.rm=TRUE),
+                                                             BABIP.avg = mean(BABIP, na.rm=TRUE)) %>% as.data.frame()
+# Career Leaders
+Batting.Career <- Batting.active %>% group_by(BAT_ID, YEAR_ID) %>% 
+  filter(BABIP>=quantile(BABIP, 0.25, na.rm=TRUE),
+         BABIP<=quantile(BABIP, 0.75, na.rm=TRUE), 
+         ISO>=quantile(ISO, 0.25, na.rm=TRUE),
+         ISO<=quantile(ISO, 0.75, na.rm=TRUE),
+         OPS>=quantile(OPS, 0.25, na.rm=TRUE),
+         OPS<=quantile(OPS, 0.75, na.rm=TRUE),
+         SLG>=quantile(SLG, 0.25, na.rm=TRUE),
+         SLG<=quantile(SLG, 0.75, na.rm=TRUE),
+         OBP>=quantile(OBP, 0.25, na.rm=TRUE),
+         OBP<=quantile(OBP, 0.75, na.rm=TRUE),
+         RC>=quantile(RC, 0.25, na.rm=TRUE),
+         RC<=quantile(RC, 0.75, na.rm=TRUE)) %>% as.data.frame()
+
+#Active Roster Qualifiers
+Batting.Career.Active <- Batting.Career %>% group_by(BAT_ID, YEAR_ID) %>% filter(YEAR_ID >= "2008-01-01",
+                                                                                 YEAR_ID <= "2014-01-01") %>% as.data.frame()
+
+  #Average out the multi-appearing players
+
+Batting.Career.Active.Player <- Batting.Career.Active %>% group_by(BAT_ID, BAT_HAND_CD) %>%
+  summarize(RC.avg = mean(RC, na.rm=TRUE),
+            OBP.avg = mean((OBP/100),na.rm=TRUE), 
+            SLG.avg = mean(SLG, na.rm=TRUE), 
+            OPS.avg = mean(OPS, na.rm=TRUE), 
+            ISO.avg = mean(ISO, na.rm=TRUE), 
+            BABIP.avg = mean(BABIP, na.rm=TRUE)) %>% as.data.frame()
+
+Batting.Career.Active.Player <- merge(Batting.Career.Active.Player, Player, by="BAT_ID")
+
+# Top 25 by Runs created avg
+Batting.Career.Active.Player.Final <- Batting.Career.Active.Player %>% arrange(desc(RC.avg)) %>% head(25)
+col <- c("BAT_ID", "BAT_HAND_CD", "RC", "OBP", "SLG", "OPS", "ISO", "BABIP", "First", "Last", "Debut")
+names(Batting.Career.Active.Player.Final) <- col
+
+
+# Match the active roster's actual performance to their expected performance
+Batting.Career.Active.Future <- Batting.Career %>% group_by(BAT_ID, YEAR_ID) %>% filter(YEAR_ID == "2015-01-01") %>% as.data.frame()
+
+#Average out the multi-appearing players
+
+Batting.Career.Active.Player.Future <- Batting.Career.Active %>% group_by(BAT_ID, BAT_HAND_CD) %>%
+  summarize(RC.avg = mean(RC, na.rm=TRUE),
+            OBP.avg = mean((OBP/100),na.rm=TRUE), 
+            SLG.avg = mean(SLG, na.rm=TRUE), 
+            OPS.avg = mean(OPS, na.rm=TRUE), 
+            ISO.avg = mean(ISO, na.rm=TRUE), 
+            BABIP.avg = mean(BABIP, na.rm=TRUE)) %>% as.data.frame()
+
+Batting.Career.Active.Player.Future <- merge(Batting.Career.Active.Player.Future, Player, by="BAT_ID")
+```
+
+## Linear Regression
+```{r}
+linearModel <- lm(formula = RC ~ BABIP + OBP + SLG + OPS + ISO + BAT_HAND_CD, data = Batting.active)
+summary(linearModel)
+
+# Predictions
+Trout <- data.frame(Batting.Career.Active.Player.Final[1,2:8])
+Cabrera <- data.frame(Batting.Career.Active.Player.Final[2,2:8])
+Fielder <- data.frame(Batting.Career.Active.Player.Final[3,2:8])
+
+Trout.model <- predict(linearModel, newdata = Trout)
+Cabrera.model <- predict(linearModel, newdata = Cabrera)
+Fielder.model <- predict(linearModel, newdata = Fielder)
+
+Trout.Future <- Batting.Career.Active.Player.Future %>% filter(BAT_ID == "troum001")
+Cabrera.Future <- Batting.Career.Active.Player.Future %>% filter(BAT_ID == "cabrm001")
+Fielder.Future <- Batting.Career.Active.Player.Future %>% filter(BAT_ID == "fielp001")
+```
